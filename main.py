@@ -298,6 +298,8 @@ def background_crawler():
 async def startup_event():
     thread = threading.Thread(target=background_crawler, daemon=True)
     thread.start()
+    thread2 = threading.Thread(target=background_english_crawler, daemon=True)
+    thread2.start()
 
 
 # ─────────────────────────────────────────
@@ -334,4 +336,126 @@ def health():
         "last_updated": cache.get("last_updated"),
         "last_updated_display": cache.get("last_updated_display"),
         "window": "Last 24 hours"
+    }
+
+
+# ─────────────────────────────────────────
+# ENGLISH NEWS RSS ENDPOINT
+# Real-time English news — no API delay
+# ─────────────────────────────────────────
+ENGLISH_RSS_SOURCES = [
+    {"name": "NDTV", "url": "https://feeds.feedburner.com/ndtvnews-india-news"},
+    {"name": "The Hindu", "url": "https://www.thehindu.com/news/national/andhra-pradesh/?service=rss"},
+    {"name": "Indian Express", "url": "https://indianexpress.com/feed/"},
+    {"name": "Deccan Chronicle", "url": "https://www.deccanchronicle.com/rss_feed/"},
+    {"name": "New Indian Express", "url": "https://www.newindianexpress.com/rss/andhra-pradesh.xml"},
+    {"name": "Times of India", "url": "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms"},
+    {"name": "Hindustan Times", "url": "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml"},
+]
+
+ENGLISH_POLITICAL_KEYWORDS = [
+    "andhra pradesh","ysrcp","jagan","chandrababu","tdp","pawan kalyan",
+    "janasena","bjp","politics","political","minister","government","election",
+    "mla","mp","assembly","parliament","opposition","ruling","governance",
+    "amaravati","telugu desam","ysr congress","ap government","ap cm",
+    "lokesh","naidu","revanth","telangana","hyderabad politics"
+]
+
+english_cache = {"articles": [], "last_updated": None}
+
+def fetch_english_rss():
+    articles = []
+    now = now_ist()
+    cutoff = now - timedelta(hours=24)
+
+    for source in ENGLISH_RSS_SOURCES:
+        try:
+            resp = requests.get(source["url"], headers=HEADERS, timeout=10)
+            soup = BeautifulSoup(resp.content, "xml")
+            items = soup.find_all("item") or soup.find_all("entry")
+
+            for item in items[:20]:
+                title_tag = item.find("title")
+                link_tag = item.find("link")
+                pub_tag = item.find("pubDate") or item.find("published")
+                desc_tag = item.find("description") or item.find("summary")
+
+                if not title_tag:
+                    continue
+
+                title = title_tag.get_text(strip=True)
+                if len(title) < 15:
+                    continue
+
+                # Check if political
+                text = title.lower()
+                if desc_tag:
+                    text += " " + desc_tag.get_text(strip=True).lower()[:200]
+
+                if not any(kw in text for kw in ENGLISH_POLITICAL_KEYWORDS):
+                    continue
+
+                pub_date = parse_pub_date(pub_tag.get_text(strip=True) if pub_tag else None)
+                if pub_date < cutoff:
+                    continue
+
+                link = ""
+                if link_tag:
+                    link = link_tag.get_text(strip=True) or link_tag.get("href", "")
+
+                description = ""
+                if desc_tag:
+                    description = BeautifulSoup(desc_tag.get_text(), "html.parser").get_text(strip=True)[:200]
+
+                party_info = classify_party(title, description)
+
+                articles.append({
+                    "title": title,
+                    "url": link,
+                    "source": source["name"],
+                    "description": description,
+                    "published_at": format_ist(pub_date),
+                    "published_display": pub_date.strftime("%d %b %Y, %I:%M %p IST"),
+                    "scraped_at": now_ist_str(),
+                    **party_info
+                })
+
+        except Exception as e:
+            print(f"  English RSS {source['name']} failed: {e}")
+
+    # Sort by publish date newest first
+    articles.sort(key=lambda x: x.get("published_at", ""), reverse=True)
+
+    # Deduplicate
+    seen = set()
+    unique = []
+    for a in articles:
+        if a["title"] not in seen:
+            seen.add(a["title"])
+            unique.append(a)
+
+    english_cache["articles"] = unique
+    english_cache["last_updated"] = now_ist_str()
+    print(f"  English RSS: {len(unique)} political articles")
+    return unique
+
+
+def background_english_crawler():
+    while True:
+        try:
+            fetch_english_rss()
+        except Exception as e:
+            print(f"English crawl error: {e}")
+        time.sleep(10 * 60)  # every 10 minutes
+
+
+
+
+@app.get("/english")
+def get_english(limit: int = 30):
+    articles = english_cache["articles"]
+    return {
+        "count": len(articles[:limit]),
+        "last_updated": english_cache.get("last_updated"),
+        "articles": articles[:limit]
     }

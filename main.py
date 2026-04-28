@@ -10,7 +10,12 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def now_ist():
+    return datetime.now(IST).strftime("%Y-%m-%dT%H:%M:%S")
 
 app = FastAPI(title="NādiPulse Telugu News API")
 
@@ -64,7 +69,7 @@ def scrape_eenadu():
                 "source": "Eenadu",
                 "bias": "TDP Pro",
                 "language": "te",
-                "scraped_at": datetime.now().isoformat()
+                "scraped_at": now_ist()
             })
 
         print(f"  Eenadu: {len(articles)} articles")
@@ -101,7 +106,7 @@ def scrape_andhrajyothi():
                 "source": "Andhra Jyothi",
                 "bias": "TDP Pro",
                 "language": "te",
-                "scraped_at": datetime.now().isoformat()
+                "scraped_at": now_ist()
             })
 
         print(f"  AndhraJyothi: {len(articles)} articles")
@@ -138,7 +143,7 @@ def scrape_sakshi():
                 "source": "Sakshi",
                 "bias": "YSRCP Pro",
                 "language": "te",
-                "scraped_at": datetime.now().isoformat()
+                "scraped_at": now_ist()
             })
 
         print(f"  Sakshi: {len(articles)} articles")
@@ -165,7 +170,7 @@ def scrape_tv9():
                 "source": "TV9 Telugu",
                 "bias": "Neutral",
                 "language": "te",
-                "scraped_at": datetime.now().isoformat()
+                "scraped_at": now_ist()
             })
         print(f"  TV9: {len(articles)} articles")
     except Exception as e:
@@ -191,7 +196,7 @@ def scrape_ntv():
                 "source": "NTV Telugu",
                 "bias": "Neutral",
                 "language": "te",
-                "scraped_at": datetime.now().isoformat()
+                "scraped_at": now_ist()
             })
         print(f"  NTV: {len(articles)} articles")
     except Exception as e:
@@ -217,7 +222,7 @@ def scrape_10tv():
                 "source": "10TV",
                 "bias": "Neutral",
                 "language": "te",
-                "scraped_at": datetime.now().isoformat()
+                "scraped_at": now_ist()
             })
         print(f"  10TV: {len(articles)} articles")
     except Exception as e:
@@ -247,7 +252,7 @@ def crawl_all():
             unique.append(a)
 
     cache["articles"] = unique
-    cache["last_updated"] = datetime.now().isoformat()
+    cache["last_updated"] = now_ist()
     cache["status"] = "ok"
     print(f"  Done: {len(unique)} unique articles cached")
 

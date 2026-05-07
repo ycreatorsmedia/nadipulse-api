@@ -1,8 +1,9 @@
 """
-NādiPulse Telugu News API v3
-- Extracts actual publish dates from articles
+NādiPulse Telugu & English News API v4
 - Political articles only
-- Rolling 24-hour window
+- Party, Spokesperson, Topic tagging
+- English + Telugu RSS sources
+- 24-hour rolling window
 - IST timestamps
 """
 
@@ -13,449 +14,292 @@ from bs4 import BeautifulSoup
 import time
 import threading
 from datetime import datetime, timezone, timedelta
-import re
 
-app = FastAPI(title="NādiPulse Telugu News API")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="NādiPulse News API v4")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["GET"], allow_headers=["*"])
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "te-IN,te;q=0.9,en;q=0.8",
 }
 
 IST = timezone(timedelta(hours=5, minutes=30))
-
-def now_ist():
-    return datetime.now(IST)
-
-def now_ist_str():
-    return datetime.now(IST).strftime("%Y-%m-%dT%H:%M:%S+05:30")
-
-def format_ist(dt):
-    """Format datetime as IST string"""
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=IST)
+def now_ist(): return datetime.now(IST)
+def now_ist_str(): return datetime.now(IST).strftime("%Y-%m-%dT%H:%M:%S+05:30")
+def fmt_ist(dt):
+    if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
     return dt.astimezone(IST).strftime("%Y-%m-%dT%H:%M:%S+05:30")
+def display_ist(dt):
+    if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(IST).strftime("%d %b %Y, %I:%M %p IST")
 
-cache = {
-    "articles": [],
-    "last_updated": None,
-    "last_updated_display": None,
-    "status": "starting"
+cache = {"articles": [], "english": [], "last_updated": None, "status": "starting"}
+
+# ─── POLITICAL FILTER ───────────────────
+POLITICAL_KW = [
+    "రాజకీయ","ప్రభుత్వ","మంత్రి","ముఖ్యమంత్రి","అసెంబ్లీ","పార్లమెంట్","ఎన్నిక",
+    "వైఎస్ఆర్సీపీ","టీడీపీ","బీజేపీ","జనసేన","జగన్","చంద్రబాబు","పవన్","లోకేశ్",
+    "విపక్షం","ఎమ్మెల్యే","ఎంపీ","సీఎం","బడ్జెట్","పథకం","ఆరోపణ","పార్టీ",
+    "government","minister","chief minister","assembly","parliament","election",
+    "YSRCP","TDP","BJP","Janasena","JSP","Congress","jagan","chandrababu",
+    "pawan kalyan","lokesh","naidu","opposition","ruling","MLA","MP","CM",
+    "cabinet","budget","scheme","welfare","policy","allegation","political","party",
+    "governance","andhra pradesh","telugu desam","ysr congress","amaravati",
+    "revanth","cm naidu","deputy cm","ap govt","ap government","ap assembly",
+]
+EXCLUDE_KW = [
+    "cricket","ipl","football","match","score","wicket","batting","bowling","tournament",
+    "movie","film","actor","actress","director","cinema","box office","release","trailer","ott",
+    "recipe","cooking","fashion","beauty","horoscope","astrology","vastu","wedding",
+    "ఐపీఎల్","క్రికెట్","మ్యాచ్","సినిమా","మూవీ","హీరో","హీరోయిన్","నటుడు","రాశిఫలం",
+]
+def is_political(title, desc=""):
+    t = (title+" "+(desc or "")).lower()
+    return not any(k.lower() in t for k in EXCLUDE_KW) and any(k.lower() in t for k in POLITICAL_KW)
+
+# ─── PARTY + SPOKESPERSON + TOPIC TAGGING ───
+YSRCP_LEADERS = [
+    "jagan","ys jagan","jaganmohan","jagan mohan reddy","ysr","vijayasai reddy",
+    "sajjala","buggana","ambati rambabu","peddireddy","botsa satyanarayana",
+    "talasila","vella murali","roja","seediri","కేడీ","జగన్","అంబటి","విజయసాయి",
+    "సజ్జల","బుగ్గన","బొత్స"
+]
+TDP_LEADERS = [
+    "chandrababu","naidu","lokesh","nara lokesh","nara chandrababu",
+    "kinjarapu atchen naidu","kollu ravindra","kola suresh","devineni uma",
+    "nimmala ramanaidu","gottipati ravi kumar","চন্দ্রবাবু","చంద్రబాబు","లోకేశ్","నారా"
+]
+BJP_LEADERS = [
+    "puranik","vishnu deo sai","daggubati","kishan reddy","bandi sanjay",
+    "ap bjp","బండి సంజయ్","కిషన్ రెడ్డి"
+]
+JSP_LEADERS = [
+    "pawan kalyan","pawankalyan","pawan","deputy cm pawan","jsp","janasena",
+    "పవన్ కల్యాణ్","పవన్","జనసేన"
+]
+
+TOPICS = {
+    "Aarogyasri": ["aarogyasri","ఆరోగ్యశ్రీ","health scheme","hospital","medical"],
+    "Amaravati": ["amaravati","అమరావతి","capital city","capital region"],
+    "Farm Loan": ["farm loan","రైతు రుణమాఫీ","agriculture loan","crop loan","రైతు"],
+    "Fuel Crisis": ["petrol","diesel","fuel","పెట్రోల్","డీజిల్","bunk","shortage"],
+    "Google/IT": ["google","data center","it sector","tech park","విశాఖ","vizag"],
+    "Law & Order": ["arrest","fir","police","court","case","హైకోర్టు","supreme court"],
+    "Elections": ["election","poll","by-poll","వోటు","ఎన్నిక","campaign","nomination"],
+    "Welfare": ["welfare","scheme","pension","పింఛన్","పథకం","beneficiary"],
+    "Budget": ["budget","funds","allocation","నిధులు","బడ్జెట్","financial"],
+    "Education": ["school","college","university","students","విద్య","education"],
+    "Corruption": ["corruption","scam","fraud","అవినీతి","కుంభకోణం","misappropriation"],
+    "Governance": ["governance","administration","policy","పాలన","అభివృద్ధి","development"],
 }
 
-# ─────────────────────────────────────────
-# POLITICAL FILTER
-# ─────────────────────────────────────────
-POLITICAL_KEYWORDS = [
-    "రాజకీయ","ప్రభుత్వ","మంత్రి","ముఖ్యమంత్రి","అసెంబ్లీ","పార్లమెంట్",
-    "ఎన్నిక","వైఎస్ఆర్సీపీ","టీడీపీ","బీజేపీ","జనసేన","కాంగ్రెస్",
-    "జగన్","చంద్రబాబు","పవన్","లోకేశ్","విపక్షం","అధికార",
-    "ఎమ్మెల్యే","ఎంపీ","సీఎం","మంత్రివర్గ","బడ్జెట్","పథకం","సంక్షేమ",
-    "ఆరోపణ","విమర్శ","పాలన","పార్టీ","ఓటు","నియోజకవర్గ",
-    "government","minister","chief minister","assembly","parliament",
-    "election","YSRCP","TDP","BJP","Janasena","Congress",
-    "jagan","chandrababu","pawan","lokesh","opposition","ruling",
-    "MLA","MP","CM","cabinet","budget","scheme","welfare","policy",
-    "allegation","criticism","political","party","vote","constituency",
-    "governance","andhra pradesh government","telugu desam","ysr congress",
-]
+def tag_article(title, desc=""):
+    text = (title+" "+(desc or "")).lower()
+    
+    # Party detection
+    has_ysrcp = any(l.lower() in text for l in YSRCP_LEADERS) or any(k in text for k in ["ysrcp","ysr congress","విపక్షం opposition leader"])
+    has_tdp = any(l.lower() in text for l in TDP_LEADERS) or any(k in text for k in ["tdp","telugu desam","ruling government","ap government","cm naidu"])
+    has_bjp = any(l.lower() in text for l in BJP_LEADERS) or "bjp" in text or "bharatiya janata" in text
+    has_jsp = any(l.lower() in text for l in JSP_LEADERS) or "janasena" in text or "జనసేన" in text
+    
+    parties = []
+    if has_ysrcp: parties.append("YSRCP")
+    if has_tdp: parties.append("TDP")
+    if has_bjp: parties.append("BJP")
+    if has_jsp: parties.append("JSP")
+    party = "/".join(parties) if parties else "General"
+    
+    # Spokesperson detection
+    spokesperson = "None"
+    full_text = title+" "+(desc or "")
+    for l in YSRCP_LEADERS + TDP_LEADERS + BJP_LEADERS + JSP_LEADERS:
+        if l.lower() in full_text.lower() and len(l) > 4:
+            spokesperson = l.title()
+            break
+    
+    # Topic detection
+    topic = "Politics"
+    for t_name, keywords in TOPICS.items():
+        if any(k.lower() in text for k in keywords):
+            topic = t_name
+            break
+    
+    # Sentiment
+    neg_kw = ["attack","criticize","condemn","scam","fraud","failure","corruption","అవినీతి","విమర్శ","ఆరోపణ","వైఫల్యం"]
+    pos_kw = ["develop","inaugurat","launch","scheme","welfare","achievement","అభివృద్ధి","ప్రారంభ","పథకం"]
+    sentiment = "Negative" if any(k in text for k in neg_kw) else "Positive" if any(k in text for k in pos_kw) else "Neutral"
+    
+    return {"party": party, "spokesperson": spokesperson, "topic": topic, "sentiment": sentiment}
 
-EXCLUDE_KEYWORDS = [
-    "cricket","ipl","football","tennis","match","score","wicket",
-    "batting","bowling","stadium","tournament","champion","trophy",
-    "movie","film","actor","actress","director","cinema","box office",
-    "release","trailer","teaser","ott","series",
-    "ఐపీఎల్","క్రికెట్","మ్యాచ్","స్కోర్",
-    "సినిమా","మూవీ","హీరో","హీరోయిన్","నటుడు","విడుదల",
-    "recipe","cooking","fashion","beauty","horoscope","astrology",
-    "రాశిఫలం","వాస్తు","వంటకం","అందం","ఫ్యాషన్",
-    "accident road","fire broke","flood","earthquake","weather",
-]
-
-def is_political(title, description=""):
-    text = (title + " " + (description or "")).lower()
-    for kw in EXCLUDE_KEYWORDS:
-        if kw.lower() in text:
-            return False
-    for kw in POLITICAL_KEYWORDS:
-        if kw.lower() in text:
-            return True
-    return False
-
-# ─────────────────────────────────────────
-# PARTY SENTIMENT CLASSIFICATION
-# ─────────────────────────────────────────
-def classify_party(title, description=""):
-    text = (title + " " + (description or "")).lower()
-
-    has_ysrcp = any(k in text for k in [
-        "jagan","ysrcp","ysr congress","జగన్","వైఎస్ఆర్సీపీ",
-        "విపక్షం","opposition leader","former cm jagan"
-    ])
-    has_tdp = any(k in text for k in [
-        "chandrababu","tdp","telugu desam","naidu","lokesh","pawan kalyan",
-        "janasena","చంద్రబాబు","టీడీపీ","లోకేశ్","పవన్","జనసేన",
-        "ruling government","ap government","cm naidu"
-    ])
-
-    if has_ysrcp and has_tdp:
-        return {"party": "Both", "sentiment": "Neutral"}
-    elif has_ysrcp:
-        return {"party": "YSRCP", "sentiment": "Neutral"}
-    elif has_tdp:
-        return {"party": "TDP/Alliance", "sentiment": "Neutral"}
-    return {"party": "None", "sentiment": "Neutral"}
-
-# ─────────────────────────────────────────
-# PARSE PUBLISH DATE FROM RSS ITEM
-# ─────────────────────────────────────────
-def parse_pub_date(pub_date_str):
-    """Parse RSS pubDate to IST datetime"""
-    if not pub_date_str:
-        return now_ist()
-    try:
-        # Try common RSS date formats
-        formats = [
-            "%a, %d %b %Y %H:%M:%S %z",
-            "%a, %d %b %Y %H:%M:%S GMT",
-            "%Y-%m-%dT%H:%M:%S%z",
-            "%Y-%m-%d %H:%M:%S",
-        ]
-        for fmt in formats:
-            try:
-                dt = datetime.strptime(pub_date_str.strip(), fmt)
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                return dt.astimezone(IST)
-            except:
-                continue
-    except:
-        pass
+# ─── DATE PARSER ────────────────────────
+def parse_pub(s):
+    if not s: return now_ist()
+    for fmt in ["%a, %d %b %Y %H:%M:%S %z","%a, %d %b %Y %H:%M:%S GMT","%Y-%m-%dT%H:%M:%S%z","%Y-%m-%d %H:%M:%S"]:
+        try:
+            dt = datetime.strptime(s.strip(), fmt)
+            if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(IST)
+        except: pass
     return now_ist()
 
-# ─────────────────────────────────────────
-# SCRAPERS WITH ACTUAL PUBLISH DATES
-# ─────────────────────────────────────────
-def scrape_rss_with_dates(rss_url, source_name):
-    """Scrape RSS feed and get actual publish dates"""
-    articles = []
+# ─── SCRAPE RSS ─────────────────────────
+def scrape_rss(url, source, lang="te"):
+    out = []
     try:
-        resp = requests.get(rss_url, headers=HEADERS, timeout=12)
-        soup = BeautifulSoup(resp.content, "xml")
+        r = requests.get(url, headers=HEADERS, timeout=12)
+        soup = BeautifulSoup(r.content, "xml")
         items = soup.find_all("item") or soup.find_all("entry")
-
-        now = now_ist()
-        cutoff = now - timedelta(hours=24)
-
-        for item in items[:30]:
-            title_tag = item.find("title")
-            link_tag = item.find("link")
-            pub_tag = item.find("pubDate") or item.find("published") or item.find("updated")
-
-            if not title_tag:
-                continue
-
-            title = title_tag.get_text(strip=True)
-            if len(title) < 15:
-                continue
-
-            # Get actual publish date
-            pub_date = parse_pub_date(pub_tag.get_text(strip=True) if pub_tag else None)
-
-            # Skip if older than 24 hours
-            if pub_date < cutoff:
-                continue
-
-            # Political filter
-            if not is_political(title):
-                continue
-
-            link = ""
-            if link_tag:
-                link = link_tag.get_text(strip=True) or link_tag.get("href", "")
-
-            party_info = classify_party(title)
-
-            articles.append({
-                "title": title,
-                "url": link,
-                "source": source_name,
-                "published_at": format_ist(pub_date),       # actual article publish time
-                "published_display": pub_date.strftime("%d %b %Y, %I:%M %p IST"),
-                "scraped_at": now_ist_str(),
-                **party_info
+        cutoff = now_ist() - timedelta(hours=24)
+        for item in items[:25]:
+            ttag = item.find("title")
+            ltag = item.find("link")
+            ptag = item.find("pubDate") or item.find("published")
+            dtag = item.find("description") or item.find("summary")
+            if not ttag: continue
+            title = ttag.get_text(strip=True)
+            if len(title) < 15: continue
+            desc = BeautifulSoup(dtag.get_text(), "html.parser").get_text(strip=True)[:200] if dtag else ""
+            if not is_political(title, desc): continue
+            pub = parse_pub(ptag.get_text(strip=True) if ptag else None)
+            if pub < cutoff: continue
+            link = ltag.get_text(strip=True) if ltag else ""
+            tags = tag_article(title, desc)
+            out.append({
+                "title": title, "url": link, "source": source,
+                "description": desc, "language": lang,
+                "published_at": fmt_ist(pub),
+                "published_display": display_ist(pub),
+                "scraped_at": now_ist_str(), **tags
             })
-
-        print(f"  {source_name}: {len(articles)} political articles (last 24h)")
     except Exception as e:
-        print(f"  {source_name} RSS failed: {e}")
-    return articles
+        print(f"  RSS {source}: {e}")
+    return out
 
-
-def scrape_page_with_dates(url, source_name):
-    """Scrape HTML page — use scraped_at as published_at since no date on page"""
-    articles = []
+# ─── SCRAPE HTML ─────────────────────────
+def scrape_html(url, source, base_url, path_filter):
+    out = []
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        soup = BeautifulSoup(resp.text, "html.parser")
-
+        r = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(r.text, "html.parser")
         seen = set()
-        for a_tag in soup.find_all("a", href=True):
-            h = a_tag.find("h3") or a_tag.find("h2") or a_tag.find("h4")
-            if not h:
-                continue
+        for a in soup.find_all("a", href=True):
+            h = a.find(["h2","h3","h4"])
+            if not h: continue
             title = h.get_text(strip=True)
-            if len(title) < 15 or title in seen:
-                continue
+            if len(title) < 15 or title in seen: continue
             seen.add(title)
-
-            href = a_tag["href"]
-            if not href.startswith("http"):
-                base = "/".join(url.split("/")[:3])
-                href = base + href
-
-            if not is_political(title):
-                continue
-
-            # For HTML scraped pages, try to find date in URL or nearby elements
-            # Eenadu URLs contain date in article ID, Sakshi has dates near articles
-            pub_date = now_ist()  # default to now
-
-            party_info = classify_party(title)
-
-            articles.append({
-                "title": title,
-                "url": href,
-                "source": source_name,
-                "published_at": format_ist(pub_date),
-                "published_display": pub_date.strftime("%d %b %Y, %I:%M %p IST"),
-                "scraped_at": now_ist_str(),
-                **party_info
+            href = a["href"]
+            if not href.startswith("http"): href = base_url + href
+            if path_filter and path_filter not in href: continue
+            if not is_political(title): continue
+            tags = tag_article(title)
+            out.append({
+                "title": title, "url": href, "source": source,
+                "description": "", "language": "te",
+                "published_at": now_ist_str(),
+                "published_display": display_ist(now_ist()),
+                "scraped_at": now_ist_str(), **tags
             })
-
-            if len(articles) >= 15:
-                break
-
-        print(f"  {source_name}: {len(articles)} political articles")
+            if len(out) >= 12: break
     except Exception as e:
-        print(f"  {source_name} failed: {e}")
-    return articles
+        print(f"  HTML {source}: {e}")
+    return out
 
+# ─── ALL SOURCES ────────────────────────
+TELUGU_RSS = [
+    ("https://tv9telugu.com/feed",           "TV9 Telugu",     "te"),
+    ("https://ntvtelugu.com/feed",           "NTV Telugu",     "te"),
+    ("https://10tv.in/feed",                 "10TV",           "te"),
+    ("https://tv5news.in/feed",              "TV5 News",       "te"),
+    ("https://www.andhrajyothy.com/feed",    "Andhra Jyothi",  "te"),
+]
 
-# ─────────────────────────────────────────
-# ALL SOURCES
-# ─────────────────────────────────────────
-def crawl_all():
-    print(f"\n[{now_ist().strftime('%d %b %H:%M:%S IST')}] Crawling AP political news (last 24h)...")
-    all_articles = []
+ENGLISH_RSS = [
+    ("https://feeds.feedburner.com/ndtvnews-india-news",                          "NDTV",               "en"),
+    ("https://www.thehindu.com/news/national/andhra-pradesh/?service=rss",        "The Hindu",          "en"),
+    ("https://indianexpress.com/feed/",                                            "Indian Express",     "en"),
+    ("https://www.deccanchronicle.com/rss_feed/",                                 "Deccan Chronicle",   "en"),
+    ("https://www.newindianexpress.com/rss/andhra-pradesh.xml",                   "New Indian Express", "en"),
+    ("https://timesofindia.indiatimes.com/rssfeeds/296589292.cms",                "Times of India",     "en"),
+    ("https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml",           "Hindustan Times",    "en"),
+    ("https://telugu.news18.com/commonfeeds/v1/tel/rss/news.xml",                 "News18 Telugu",      "en"),
+    ("https://www.siasat.com/feed/",                                               "Siasat",             "en"),
+    ("https://theprint.in/feed/",                                                  "The Print",          "en"),
+]
 
-    # RSS sources (have actual publish dates)
-    all_articles.extend(scrape_rss_with_dates("https://tv9telugu.com/feed", "TV9 Telugu"))
-    all_articles.extend(scrape_rss_with_dates("https://ntvtelugu.com/feed", "NTV Telugu"))
-    all_articles.extend(scrape_rss_with_dates("https://10tv.in/feed", "10TV"))
+TELUGU_HTML = [
+    ("https://www.eenadu.net/andhra-pradesh",  "Eenadu",       "https://www.eenadu.net", "/telugu-news/"),
+    ("https://www.sakshi.com/andhra-pradesh-news", "Sakshi",   "https://www.sakshi.com", "/telugu-news/"),
+]
 
-    # HTML scrape sources (no RSS dates but fresh content)
-    all_articles.extend(scrape_page_with_dates("https://www.eenadu.net/andhra-pradesh", "Eenadu"))
-    all_articles.extend(scrape_page_with_dates("https://www.andhrajyothy.com/andhra-pradesh", "Andhra Jyothi"))
-    all_articles.extend(scrape_page_with_dates("https://www.sakshi.com/andhra-pradesh-news", "Sakshi"))
+def crawl():
+    print(f"\n[{now_ist().strftime('%d %b %H:%M IST')}] Crawling all sources...")
+    all_te, all_en = [], []
 
-    # Deduplicate
-    seen = set()
-    unique = []
-    for a in all_articles:
-        if a["title"] not in seen:
-            seen.add(a["title"])
-            unique.append(a)
+    for url, src, lang in TELUGU_RSS:
+        all_te.extend(scrape_rss(url, src, lang))
+        time.sleep(0.5)
 
-    # Sort by published_at (newest first)
-    unique.sort(key=lambda x: x.get("published_at", ""), reverse=True)
+    for url, src, base, filt in TELUGU_HTML:
+        all_te.extend(scrape_html(url, src, base, filt))
+        time.sleep(1)
 
-    cache["articles"] = unique
+    for url, src, lang in ENGLISH_RSS:
+        all_en.extend(scrape_rss(url, src, lang))
+        time.sleep(0.5)
+
+    def dedup(items):
+        seen, out = set(), []
+        for a in items:
+            if a["title"] not in seen:
+                seen.add(a["title"])
+                out.append(a)
+        return sorted(out, key=lambda x: x.get("published_at",""), reverse=True)
+
+    cache["articles"] = dedup(all_te)
+    cache["english"]  = dedup(all_en)
     cache["last_updated"] = now_ist_str()
-    cache["last_updated_display"] = now_ist().strftime("%d %b %Y, %I:%M %p IST")
     cache["status"] = "ok"
-    print(f"  Done: {len(unique)} political articles (last 24h)")
+    print(f"  Done: {len(cache['articles'])} Telugu + {len(cache['english'])} English political articles")
 
-
-def background_crawler():
+def bg_crawl():
     while True:
-        try:
-            crawl_all()
-        except Exception as e:
-            print(f"Crawl error: {e}")
-        time.sleep(15 * 60)
-
+        try: crawl()
+        except Exception as e: print(f"Crawl error: {e}")
+        time.sleep(15*60)
 
 @app.on_event("startup")
-async def startup_event():
-    thread = threading.Thread(target=background_crawler, daemon=True)
-    thread.start()
-    thread2 = threading.Thread(target=background_english_crawler, daemon=True)
-    thread2.start()
+async def startup():
+    threading.Thread(target=bg_crawl, daemon=True).start()
 
-
-# ─────────────────────────────────────────
-# API ENDPOINTS
-# ─────────────────────────────────────────
 @app.get("/")
 def root():
-    return {
-        "name": "NādiPulse Telugu Political News API v3",
-        "articles": len(cache["articles"]),
-        "last_updated": cache.get("last_updated"),
-        "last_updated_display": cache.get("last_updated_display"),
-        "status": cache["status"],
-        "window": "Last 24 hours"
-    }
+    return {"name":"NādiPulse News API v4","telugu":len(cache["articles"]),"english":len(cache["english"]),"last_updated":cache.get("last_updated"),"status":cache["status"]}
 
 @app.get("/news")
-def get_news(party: str = None, limit: int = 100):
-    articles = cache["articles"]
-    if party:
-        articles = [a for a in articles if party.lower() in (a.get("party") or "").lower()]
-    return {
-        "count": len(articles[:limit]),
-        "last_updated": cache.get("last_updated"),
-        "last_updated_display": cache.get("last_updated_display"),
-        "articles": articles[:limit]
-    }
+def news(party:str=None, lang:str=None, limit:int=100):
+    arts = cache["articles"]
+    if party: arts = [a for a in arts if party.lower() in a.get("party","").lower()]
+    if lang:  arts = [a for a in arts if a.get("language","") == lang]
+    return {"count":len(arts[:limit]),"last_updated":cache.get("last_updated"),"articles":arts[:limit]}
+
+@app.get("/english")
+def english(party:str=None, limit:int=100):
+    arts = cache["english"]
+    if party: arts = [a for a in arts if party.lower() in a.get("party","").lower()]
+    return {"count":len(arts[:limit]),"last_updated":cache.get("last_updated"),"articles":arts[:limit]}
+
+@app.get("/all")
+def all_news(limit:int=200):
+    combined = cache["articles"] + cache["english"]
+    combined.sort(key=lambda x: x.get("published_at",""), reverse=True)
+    seen, out = set(), []
+    for a in combined:
+        if a["title"] not in seen:
+            seen.add(a["title"])
+            out.append(a)
+    return {"count":len(out[:limit]),"last_updated":cache.get("last_updated"),"articles":out[:limit]}
 
 @app.get("/health")
 def health():
-    return {
-        "status": cache["status"],
-        "articles": len(cache["articles"]),
-        "last_updated": cache.get("last_updated"),
-        "last_updated_display": cache.get("last_updated_display"),
-        "window": "Last 24 hours"
-    }
-
-
-# ─────────────────────────────────────────
-# ENGLISH NEWS RSS ENDPOINT
-# Real-time English news — no API delay
-# ─────────────────────────────────────────
-ENGLISH_RSS_SOURCES = [
-    {"name": "NDTV", "url": "https://feeds.feedburner.com/ndtvnews-india-news"},
-    {"name": "The Hindu", "url": "https://www.thehindu.com/news/national/andhra-pradesh/?service=rss"},
-    {"name": "Indian Express", "url": "https://indianexpress.com/feed/"},
-    {"name": "Deccan Chronicle", "url": "https://www.deccanchronicle.com/rss_feed/"},
-    {"name": "New Indian Express", "url": "https://www.newindianexpress.com/rss/andhra-pradesh.xml"},
-    {"name": "Times of India", "url": "https://timesofindia.indiatimes.com/rssfeeds/296589292.cms"},
-    {"name": "Hindustan Times", "url": "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml"},
-]
-
-ENGLISH_POLITICAL_KEYWORDS = [
-    "andhra pradesh","ysrcp","jagan","chandrababu","tdp","pawan kalyan",
-    "janasena","bjp","politics","political","minister","government","election",
-    "mla","mp","assembly","parliament","opposition","ruling","governance",
-    "amaravati","telugu desam","ysr congress","ap government","ap cm",
-    "lokesh","naidu","revanth","telangana","hyderabad politics"
-]
-
-english_cache = {"articles": [], "last_updated": None}
-
-def fetch_english_rss():
-    articles = []
-    now = now_ist()
-    cutoff = now - timedelta(hours=24)
-
-    for source in ENGLISH_RSS_SOURCES:
-        try:
-            resp = requests.get(source["url"], headers=HEADERS, timeout=10)
-            soup = BeautifulSoup(resp.content, "xml")
-            items = soup.find_all("item") or soup.find_all("entry")
-
-            for item in items[:20]:
-                title_tag = item.find("title")
-                link_tag = item.find("link")
-                pub_tag = item.find("pubDate") or item.find("published")
-                desc_tag = item.find("description") or item.find("summary")
-
-                if not title_tag:
-                    continue
-
-                title = title_tag.get_text(strip=True)
-                if len(title) < 15:
-                    continue
-
-                # Check if political
-                text = title.lower()
-                if desc_tag:
-                    text += " " + desc_tag.get_text(strip=True).lower()[:200]
-
-                if not any(kw in text for kw in ENGLISH_POLITICAL_KEYWORDS):
-                    continue
-
-                pub_date = parse_pub_date(pub_tag.get_text(strip=True) if pub_tag else None)
-                if pub_date < cutoff:
-                    continue
-
-                link = ""
-                if link_tag:
-                    link = link_tag.get_text(strip=True) or link_tag.get("href", "")
-
-                description = ""
-                if desc_tag:
-                    description = BeautifulSoup(desc_tag.get_text(), "html.parser").get_text(strip=True)[:200]
-
-                party_info = classify_party(title, description)
-
-                articles.append({
-                    "title": title,
-                    "url": link,
-                    "source": source["name"],
-                    "description": description,
-                    "published_at": format_ist(pub_date),
-                    "published_display": pub_date.strftime("%d %b %Y, %I:%M %p IST"),
-                    "scraped_at": now_ist_str(),
-                    **party_info
-                })
-
-        except Exception as e:
-            print(f"  English RSS {source['name']} failed: {e}")
-
-    # Sort by publish date newest first
-    articles.sort(key=lambda x: x.get("published_at", ""), reverse=True)
-
-    # Deduplicate
-    seen = set()
-    unique = []
-    for a in articles:
-        if a["title"] not in seen:
-            seen.add(a["title"])
-            unique.append(a)
-
-    english_cache["articles"] = unique
-    english_cache["last_updated"] = now_ist_str()
-    print(f"  English RSS: {len(unique)} political articles")
-    return unique
-
-
-def background_english_crawler():
-    while True:
-        try:
-            fetch_english_rss()
-        except Exception as e:
-            print(f"English crawl error: {e}")
-        time.sleep(10 * 60)  # every 10 minutes
-
-
-
-
-@app.get("/english")
-def get_english(limit: int = 30):
-    articles = english_cache["articles"]
-    return {
-        "count": len(articles[:limit]),
-        "last_updated": english_cache.get("last_updated"),
-        "articles": articles[:limit]
-    }
+    return {"status":cache["status"],"telugu":len(cache["articles"]),"english":len(cache["english"]),"last_updated":cache.get("last_updated")}

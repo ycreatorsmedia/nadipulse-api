@@ -35,27 +35,100 @@ def display_ist(dt):
 
 cache = {"articles": [], "english": [], "last_updated": None, "status": "starting"}
 
-# ─── POLITICAL FILTER ───────────────────
-POLITICAL_KW = [
-    "రాజకీయ","ప్రభుత్వ","మంత్రి","ముఖ్యమంత్రి","అసెంబ్లీ","పార్లమెంట్","ఎన్నిక",
-    "వైఎస్ఆర్సీపీ","టీడీపీ","బీజేపీ","జనసేన","జగన్","చంద్రబాబు","పవన్","లోకేశ్",
-    "విపక్షం","ఎమ్మెల్యే","ఎంపీ","సీఎం","బడ్జెట్","పథకం","ఆరోపణ","పార్టీ",
-    "government","minister","chief minister","assembly","parliament","election",
-    "YSRCP","TDP","BJP","Janasena","JSP","Congress","jagan","chandrababu",
-    "pawan kalyan","lokesh","naidu","opposition","ruling","MLA","MP","CM",
-    "cabinet","budget","scheme","welfare","policy","allegation","political","party",
-    "governance","andhra pradesh","telugu desam","ysr congress","amaravati",
-    "revanth","cm naidu","deputy cm","ap govt","ap government","ap assembly",
+# ─── AP-SPECIFIC FILTER ────────────────
+# Article MUST contain AP-specific terms to pass
+# This prevents Tamil Nadu, Bengal, Assam, etc. articles from showing
+
+AP_REQUIRED = [
+    # State names
+    "andhra pradesh","andhra","telugu states","ap government","ap cm","ap bjp",
+    "ఆంధ్రప్రదేశ్","ఆంధ్ర","తెలుగు రాష్ట్రం",
+    # AP-specific parties
+    "ysrcp","ysr congress","telugu desam","tdp","janasena","జనసేన",
+    "వైఎస్ఆర్సీపీ","టీడీపీ","తెలుగుదేశం",
+    # AP Leaders (unique to AP)
+    "jagan mohan reddy","jaganmohan","ys jagan","ysr","chandrababu naidu",
+    "nara chandrababu","nara lokesh","lokesh","pawan kalyan","pawankalyan",
+    "ambati rambabu","sajjala","buggana","botsa","vijayasai reddy",
+    "seediri","peddireddy","talasila","roja","anil kumar yadav",
+    "జగన్ మోహన్","చంద్రబాబు నాయుడు","నారా లోకేశ్","పవన్ కల్యాణ్",
+    "అంబటి రంబాబు","సజ్జల","బొత్స",
+    # Short Telugu leader names (common in headlines)
+    "జగన్","చంద్రబాబు","లోకేశ్","పవన్","నాయుడు","రాజు",
+    "విజయసాయి","అంబటి","సజ్జల","బుగ్గన","బొత్స","రోజా","సీడిరి","పెద్దిరెడ్డి",
+    # AP cities/districts
+    "amaravati","visakhapatnam","vizag","vijayawada","tirupati","guntur",
+    "kurnool","nellore","kadapa","anantapur","ongole","rajahmundry",
+    "kakinada","eluru","machilipatnam","srikakulam","vizianagaram",
+    "అమరావతి","విశాఖపట్నం","విజయవాడ","తిరుపతి","గుంటూరు",
+    "కర్నూలు","నెల్లూరు","కడప","అనంతపురం","ఒంగోలు","రాజమహేంద్రవరం",
+    # AP-specific topics
+    "polavaram","aarogyasri","rythu bharosa","nabard ap","ap budget",
+    "పోలవరం","ఆరోగ్యశ్రీ","రైతు భరోసా",
+    # AP assembly/governance
+    "ap assembly","andhra assembly","ap legislature","ap high court",
+    "amaravati capital","capital city andhra","rayalaseema","uttarandhra",
+    "రాయలసీమ","ఉత్తరాంధ్ర",
 ]
+
+EXCLUDE_STATES = [
+    # Other Indian states - if these appear WITHOUT AP terms, exclude
+    "tamil nadu","tamilnadu","tamilians","chennai","tvk","vijay actor",
+    "west bengal","bengal","kolkata","mamata","trinamool","tmc",
+    "assam","guwahati","himanta","arunachal","meghalaya","nagaland","mizoram",
+    "karnataka","bengaluru","bangalore","siddaramaiah","kumaraswamy",
+    "maharashtra","mumbai","shinde","fadnavis","uddhav","ncp",
+    "delhi","arvind kejriwal","aap delhi","punjab","haryana","rajasthan",
+    "gujarat","yogi adityanath","uttar pradesh","lucknow","bihar",
+    "kerala","thiruvananthapuram","oommen","pinarayi",
+    "telangana","hyderabad","revanth reddy","brs","kcr","ktr",
+    "odisha","jharkhand","chhattisgarh","goa","manipur","tripura",
+    "jammu kashmir","ladakh","bangladesh","pakistan","china",
+    "james cameron","disney","hollywood","bollywood","cricket","ipl",
+    "swearing-in assam","assam govt","baramati","sunetra pawar","rajya sabha baramati",
+    "తమిళనాడు","తమిళ","బెంగాల్","కేరళ","కర్నాటక","మహారాష్ట్ర","తెలంగాణ",
+    "అస్సాం","గుజరాత్","రాజస్థాన్","పంజాబ్",
+]
+
+POLITICAL_KW = [
+    "government","minister","chief minister","assembly","parliament",
+    "election","political","party","MLA","MP","CM","cabinet",
+    "budget","scheme","welfare","policy","allegation","governance",
+    "రాజకీయ","ప్రభుత్వ","మంత్రి","ముఖ్యమంత్రి","అసెంబ్లీ","పార్లమెంట్",
+    "ఎన్నిక","పార్టీ","ఎమ్మెల్యే","ఎంపీ","సీఎం","బడ్జెట్","పథకం",
+]
+
 EXCLUDE_KW = [
-    "cricket","ipl","football","match","score","wicket","batting","bowling","tournament",
+    "cricket","ipl","football","match","score","wicket","batting","tournament",
     "movie","film","actor","actress","director","cinema","box office","release","trailer","ott",
     "recipe","cooking","fashion","beauty","horoscope","astrology","vastu","wedding",
     "ఐపీఎల్","క్రికెట్","మ్యాచ్","సినిమా","మూవీ","హీరో","హీరోయిన్","నటుడు","రాశిఫలం",
+    "james cameron","disney","sued","lawsuit","swearing-in ceremony",
 ]
+
 def is_political(title, desc=""):
-    t = (title+" "+(desc or "")).lower()
-    return not any(k.lower() in t for k in EXCLUDE_KW) and any(k.lower() in t for k in POLITICAL_KW)
+    text = (title+" "+(desc or "")).lower()
+
+    # Step 1: Hard exclude non-political content
+    for kw in EXCLUDE_KW:
+        if kw.lower() in text:
+            return False
+
+    # Step 2: MUST have at least one AP-specific term
+    has_ap = any(kw.lower() in text for kw in AP_REQUIRED)
+    if not has_ap:
+        return False
+
+    # Step 3: Check if it's about another state (without AP context)
+    other_state = any(kw.lower() in text for kw in EXCLUDE_STATES)
+    if other_state and not any(ap in text for ap in [
+        "andhra","ysrcp","chandrababu","jagan","pawan","tdp","amaravati",
+        "ఆంధ్ర","జగన్","చంద్రబాబు","పవన్","అమరావతి"
+    ]):
+        return False
+
+    # Step 4: Must be political
+    return any(kw.lower() in text for kw in POLITICAL_KW) or has_ap
 
 # ─── PARTY + SPOKESPERSON + TOPIC TAGGING ───
 YSRCP_LEADERS = [

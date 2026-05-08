@@ -265,15 +265,20 @@ def scrape_html(url, source, base_url, path_filter):
             if not href.startswith("http"): href = base_url + href
             if path_filter and path_filter not in href: continue
             if not is_political(title): continue
-            tags = tag_article(title)
+            # Try to get description from sibling <p> or <span>
+            desc = ""
+            p = a.find("p") or a.find_next_sibling("p")
+            if p:
+                desc = " ".join(p.get_text(strip=True).split())[:200]
+            tags = tag_article(title, desc)
             out.append({
                 "title": title, "url": href, "source": source,
-                "description": "", "language": "te",
+                "description": desc, "language": "te",
                 "published_at": now_ist_str(),
                 "published_display": display_ist(now_ist()),
                 "scraped_at": now_ist_str(), **tags
             })
-            if len(out) >= 12: break
+            if len(out) >= 15: break
     except Exception as e:
         print(f"  HTML {source}: {e}")
     return out
@@ -295,7 +300,6 @@ def scrape_sakshi():
             soup = BeautifulSoup(r.text, "html.parser")
             seen = set()
 
-            # Method 1: Find all <a> links pointing to /telugu-news/andhra-pradesh/
             for a in soup.find_all("a", href=True):
                 href = a["href"]
                 if not href.startswith("http"):
@@ -305,29 +309,44 @@ def scrape_sakshi():
                 if "/telugu-news/andhra-pradesh/" not in href:
                     continue
 
-                # Get title from link text directly (Sakshi puts title as link text)
-                title = a.get_text(strip=True)
+                # ── KEY FIX: Get ONLY direct text nodes, not child element text
+                # This prevents full article paragraphs from being included in title
+                direct_texts = [t.strip() for t in a.find_all(string=True, recursive=False)]
+                title = " ".join(t for t in direct_texts if t).strip()
 
-                # Skip short/duplicate titles
+                # Fallback: if no direct text, try first text node only
+                if not title or len(title) < 10:
+                    strings = list(a.strings)
+                    title = strings[0].strip() if strings else ""
+
+                # Clean up title — remove extra whitespace
+                title = " ".join(title.split())
+
+                # Skip short/duplicate/nav items
                 if len(title) < 15 or title in seen:
                     continue
-
-                # Skip navigation/menu items
-                if any(skip in title.lower() for skip in ["click here","read more","more news","సాక్షి","home","menu"]):
+                if any(skip in title.lower() for skip in ["click here","read more","more news","సాక్షి","home"]):
                     continue
 
                 seen.add(title)
 
+                # Get description from first <p> tag inside the <a> if exists
+                p_tag = a.find("p")
+                desc = ""
+                if p_tag:
+                    desc = p_tag.get_text(strip=True)
+                    desc = " ".join(desc.split())[:200]
+
                 # Apply AP political filter
-                if not is_political(title):
+                if not is_political(title, desc):
                     continue
 
-                tags = tag_article(title)
+                tags = tag_article(title, desc)
                 out.append({
                     "title": title,
                     "url": href,
                     "source": "Sakshi",
-                    "description": "",
+                    "description": desc,
                     "language": "te",
                     "published_at": now_ist_str(),
                     "published_display": display_ist(now_ist()),
@@ -337,7 +356,7 @@ def scrape_sakshi():
 
             if out:
                 print(f"  Sakshi ({page_url.split('/')[-1]}): {len(out)} articles")
-                break  # Stop if we got articles from first URL
+                break
 
         except Exception as e:
             print(f"  Sakshi failed ({page_url}): {e}")

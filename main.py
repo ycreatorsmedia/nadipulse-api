@@ -289,82 +289,41 @@ def scrape_html(url, source, base_url, path_filter):
 # Articles at: sakshi.com/telugu-news/andhra-pradesh/[slug]-[id]
 # Page: sakshi.com/tags/andhra-pradesh
 def scrape_sakshi():
+    """Sakshi blocks all direct server requests (403). Use NewsData.io."""
+    NEWSDATA_KEY = "pub_6e4903bc366f46d5b8cbbcc2f9593f9f"
     out = []
-    urls_to_try = [
-        "https://www.sakshi.com/tags/andhra-pradesh",
-        "https://www.sakshi.com/andhra-pradesh-news",
+    now = now_ist()
+    cutoff = now - timedelta(hours=24)
+    seen = set()
+    apis = [
+        f"https://newsdata.io/api/1/news?apikey={NEWSDATA_KEY}&domainurl=sakshi.com&language=te&size=10",
+        f"https://newsdata.io/api/1/news?apikey={NEWSDATA_KEY}&q=జగన్+OR+చంద్రబాబు&domainurl=sakshi.com&language=te&size=10",
     ]
-    for page_url in urls_to_try:
+    for api_url in apis:
         try:
-            r = requests.get(page_url, headers=HEADERS, timeout=15)
-            soup = BeautifulSoup(r.text, "html.parser")
-            seen = set()
-
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if not href.startswith("http"):
-                    href = "https://www.sakshi.com" + href
-
-                # Must be an AP article URL
-                if "/telugu-news/andhra-pradesh/" not in href:
-                    continue
-
-                # ── KEY FIX: Get ONLY direct text nodes, not child element text
-                # This prevents full article paragraphs from being included in title
-                direct_texts = [t.strip() for t in a.find_all(string=True, recursive=False)]
-                title = " ".join(t for t in direct_texts if t).strip()
-
-                # Fallback: if no direct text, try first text node only
-                if not title or len(title) < 10:
-                    strings = list(a.strings)
-                    title = strings[0].strip() if strings else ""
-
-                # Clean up title — remove extra whitespace
-                title = " ".join(title.split())
-
-                # Skip short/duplicate/nav items
-                if len(title) < 15 or title in seen:
-                    continue
-                if any(skip in title.lower() for skip in ["click here","read more","more news","సాక్షి","home"]):
-                    continue
-
+            r = requests.get(api_url, timeout=12)
+            d = r.json()
+            for item in d.get("results", []):
+                title = (item.get("title") or "").strip()
+                if len(title) < 15 or title in seen: continue
                 seen.add(title)
-
-                # Get description from first <p> tag inside the <a> if exists
-                p_tag = a.find("p")
-                desc = ""
-                if p_tag:
-                    desc = p_tag.get_text(strip=True)
-                    desc = " ".join(desc.split())[:200]
-
-                # Apply AP political filter
-                if not is_political(title, desc):
-                    continue
-
+                desc = (item.get("description") or "").strip()[:200]
+                link = item.get("link") or ""
+                pub_str = item.get("pubDate") or ""
+                pub = parse_pub(pub_str) if pub_str else now
+                if pub < cutoff: continue
+                if not is_political(title, desc): continue
                 tags = tag_article(title, desc)
-                out.append({
-                    "title": title,
-                    "url": href,
-                    "source": "Sakshi",
-                    "description": desc,
-                    "language": "te",
-                    "published_at": now_ist_str(),
-                    "published_display": display_ist(now_ist()),
-                    "scraped_at": now_ist_str(),
-                    **tags
-                })
-
+                out.append({"title":title,"url":link,"source":"Sakshi","description":desc,
+                    "language":"te","published_at":fmt_ist(pub),"published_display":display_ist(pub),
+                    "scraped_at":now_ist_str(),**tags})
             if out:
-                print(f"  Sakshi ({page_url.split('/')[-1]}): {len(out)} articles")
+                print(f"  Sakshi (NewsData): {len(out)} articles")
                 break
-
         except Exception as e:
-            print(f"  Sakshi failed ({page_url}): {e}")
-            continue
-
-    if not out:
-        print("  Sakshi: 0 articles (both URLs failed)")
-    return out[:20]
+            print(f"  Sakshi NewsData error: {e}")
+    if not out: print("  Sakshi: 0 articles")
+    return out
 
 # ─── ALL SOURCES ────────────────────────
 TELUGU_RSS = [

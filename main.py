@@ -278,6 +278,75 @@ def scrape_html(url, source, base_url, path_filter):
         print(f"  HTML {source}: {e}")
     return out
 
+
+# ─── DEDICATED SAKSHI SCRAPER ───────────────────────────────
+# Sakshi uses plain <a> link text (no h2/h3/h4 inside links)
+# Articles at: sakshi.com/telugu-news/andhra-pradesh/[slug]-[id]
+# Page: sakshi.com/tags/andhra-pradesh
+def scrape_sakshi():
+    out = []
+    urls_to_try = [
+        "https://www.sakshi.com/tags/andhra-pradesh",
+        "https://www.sakshi.com/andhra-pradesh-news",
+    ]
+    for page_url in urls_to_try:
+        try:
+            r = requests.get(page_url, headers=HEADERS, timeout=15)
+            soup = BeautifulSoup(r.text, "html.parser")
+            seen = set()
+
+            # Method 1: Find all <a> links pointing to /telugu-news/andhra-pradesh/
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+                if not href.startswith("http"):
+                    href = "https://www.sakshi.com" + href
+
+                # Must be an AP article URL
+                if "/telugu-news/andhra-pradesh/" not in href:
+                    continue
+
+                # Get title from link text directly (Sakshi puts title as link text)
+                title = a.get_text(strip=True)
+
+                # Skip short/duplicate titles
+                if len(title) < 15 or title in seen:
+                    continue
+
+                # Skip navigation/menu items
+                if any(skip in title.lower() for skip in ["click here","read more","more news","సాక్షి","home","menu"]):
+                    continue
+
+                seen.add(title)
+
+                # Apply AP political filter
+                if not is_political(title):
+                    continue
+
+                tags = tag_article(title)
+                out.append({
+                    "title": title,
+                    "url": href,
+                    "source": "Sakshi",
+                    "description": "",
+                    "language": "te",
+                    "published_at": now_ist_str(),
+                    "published_display": display_ist(now_ist()),
+                    "scraped_at": now_ist_str(),
+                    **tags
+                })
+
+            if out:
+                print(f"  Sakshi ({page_url.split('/')[-1]}): {len(out)} articles")
+                break  # Stop if we got articles from first URL
+
+        except Exception as e:
+            print(f"  Sakshi failed ({page_url}): {e}")
+            continue
+
+    if not out:
+        print("  Sakshi: 0 articles (both URLs failed)")
+    return out[:20]
+
 # ─── ALL SOURCES ────────────────────────
 TELUGU_RSS = [
     ("https://tv9telugu.com/feed",           "TV9 Telugu",     "te"),
@@ -302,7 +371,6 @@ ENGLISH_RSS = [
 
 TELUGU_HTML = [
     ("https://www.eenadu.net/andhra-pradesh",  "Eenadu",       "https://www.eenadu.net", "/telugu-news/"),
-    ("https://www.sakshi.com/andhra-pradesh-news", "Sakshi",   "https://www.sakshi.com", "/telugu-news/"),
 ]
 
 def crawl():
@@ -313,6 +381,11 @@ def crawl():
         all_te.extend(scrape_rss(url, src, lang))
         time.sleep(0.5)
 
+    # Sakshi — dedicated scraper
+    all_te.extend(scrape_sakshi())
+    time.sleep(1)
+
+    # Other HTML sources
     for url, src, base, filt in TELUGU_HTML:
         all_te.extend(scrape_html(url, src, base, filt))
         time.sleep(1)

@@ -427,6 +427,7 @@ def all_news(limit:int=200):
     return {"count":len(combined[:limit]),"last_updated":cache.get("last_updated"),"articles":combined[:limit]}
 
 @app.get("/health")
+@app.head("/health")
 def health():
     return {"status":cache["status"],"telugu":len(cache["articles"]),"english":len(cache["english"]),"last_updated":cache.get("last_updated")}
 
@@ -462,28 +463,43 @@ async def analyse(request: Request):
         if not prompt:
             return JSONResponse({"error": "No prompt provided"}, status_code=400)
 
-        # Try Groq first (fast, free)
+        # Try Groq first (fast, free) — multiple model fallbacks
         if GROQ_KEY:
-            try:
-                r = requests.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
-                    json={
-                        "model": "llama-3.1-70b-versatile",
-                        "messages": [
-                            {"role": "system", "content": system},
-                            {"role": "user", "content": prompt}
-                        ],
-                        "max_tokens": max_tokens,
-                        "temperature": 0.3
-                    },
-                    timeout=30
-                )
-                d = r.json()
-                text = d["choices"][0]["message"]["content"]
-                return JSONResponse({"text": text, "model": "groq/llama-3.1-70b"})
-            except Exception as e:
-                print(f"Groq failed: {e}")
+            groq_models = [
+                "llama-3.3-70b-versatile",
+                "llama-3.1-8b-instant",
+                "mixtral-8x7b-32768",
+            ]
+            for model in groq_models:
+                try:
+                    r = requests.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+                        json={
+                            "model": model,
+                            "messages": [
+                                {"role": "system", "content": system},
+                                {"role": "user", "content": prompt}
+                            ],
+                            "max_tokens": max_tokens,
+                            "temperature": 0.3
+                        },
+                        timeout=30
+                    )
+                    d = r.json()
+                    # Log full response if error
+                    if "error" in d:
+                        print(f"Groq {model} error: {d['error']}")
+                        continue
+                    if "choices" not in d:
+                        print(f"Groq {model} unexpected response: {list(d.keys())}")
+                        continue
+                    text = d["choices"][0]["message"]["content"]
+                    print(f"Groq success with {model}")
+                    return JSONResponse({"text": text, "model": f"groq/{model}"})
+                except Exception as e:
+                    print(f"Groq {model} failed: {e}")
+                    continue
 
         # Fallback: Claude API
         if CLAUDE_KEY:
@@ -509,7 +525,7 @@ async def analyse(request: Request):
             except Exception as e:
                 print(f"Claude failed: {e}")
 
-        return JSONResponse({"error": "No AI API key configured. Add GROQ_API_KEY or ANTHROPIC_API_KEY in Render environment variables."}, status_code=500)
+        return JSONResponse({"error": "No AI API key configured"}, status_code=500)
 
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)

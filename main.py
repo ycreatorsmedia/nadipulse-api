@@ -429,3 +429,87 @@ def all_news(limit:int=200):
 @app.get("/health")
 def health():
     return {"status":cache["status"],"telugu":len(cache["articles"]),"english":len(cache["english"]),"last_updated":cache.get("last_updated")}
+
+
+# ─── AI ANALYSIS ENDPOINT ────────────────────────────────────
+import os, json
+
+GROQ_KEY = os.getenv("GROQ_API_KEY", "")
+CLAUDE_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+
+from fastapi import Request
+from fastapi.responses import JSONResponse
+
+SYSTEM_PROMPT = """You are a senior AP political intelligence analyst. You analyze news articles about Andhra Pradesh politics for YSRCP party leadership.
+
+CRITICAL RULES:
+1. ONLY use information from the articles provided. Do NOT use any outside knowledge.
+2. If something is not mentioned in the articles, say "Not found in today's coverage".
+3. All output must be in ENGLISH only.
+4. Telugu articles are labeled [Telugu] - translate their content before analysis.
+5. Chandrababu = Naidu = CBN = N Chandrababu Naidu = CM Naidu — all are the SAME person.
+6. Always cite source names when making claims (e.g. "According to Eenadu...").
+7. Be factual, specific, and concise."""
+
+@app.post("/analyse")
+async def analyse(request: Request):
+    try:
+        body = await request.json()
+        prompt = body.get("prompt", "")
+        system = body.get("system", SYSTEM_PROMPT)
+        max_tokens = body.get("max_tokens", 1200)
+
+        if not prompt:
+            return JSONResponse({"error": "No prompt provided"}, status_code=400)
+
+        # Try Groq first (fast, free)
+        if GROQ_KEY:
+            try:
+                r = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {GROQ_KEY}", "Content-Type": "application/json"},
+                    json={
+                        "model": "llama-3.1-70b-versatile",
+                        "messages": [
+                            {"role": "system", "content": system},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "max_tokens": max_tokens,
+                        "temperature": 0.3
+                    },
+                    timeout=30
+                )
+                d = r.json()
+                text = d["choices"][0]["message"]["content"]
+                return JSONResponse({"text": text, "model": "groq/llama-3.1-70b"})
+            except Exception as e:
+                print(f"Groq failed: {e}")
+
+        # Fallback: Claude API
+        if CLAUDE_KEY:
+            try:
+                r = requests.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": CLAUDE_KEY,
+                        "anthropic-version": "2023-06-01",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": "claude-haiku-4-5-20251001",
+                        "max_tokens": max_tokens,
+                        "system": system,
+                        "messages": [{"role": "user", "content": prompt}]
+                    },
+                    timeout=30
+                )
+                d = r.json()
+                text = d["content"][0]["text"]
+                return JSONResponse({"text": text, "model": "claude-haiku"})
+            except Exception as e:
+                print(f"Claude failed: {e}")
+
+        return JSONResponse({"error": "No AI API key configured. Add GROQ_API_KEY or ANTHROPIC_API_KEY in Render environment variables."}, status_code=500)
+
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)

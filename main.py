@@ -422,79 +422,386 @@ def dedup_sort(items):
         if h not in seen: seen.add(h); out.append(a)
     return sorted(out, key=lambda x: x.get("published_at",""), reverse=True)
 
-# ── STORY CLUSTERING ─────────────────────────────────────────
-def keywords(text):
-    stop = {"and","the","of","in","to","a","is","are","was","for","on","at","by","an","or",
-            "that","this","it","be","as","with","from","but","not","have","has","said","says",
-            "ఆ","ఈ","ఇది","కి","కు","ను","లో","పై","తో","మరియు","అని","గా"}
-    return {w for w in re.findall(r'\b\w{4,}\b', text.lower()) if w not in stop}
+# ── POLITICIAN → PARTY AFFILIATION TABLE ────────────────────
+# CANONICAL mapping: politician name → party
+# Source bias != politician party. A Sakshi article about a TDP MLA
+# does NOT make that MLA YSRCP. This table is the ground truth.
+POLITICIAN_PARTY = {
+    # YSRCP Leaders
+    "jagan": "YSRCP", "ys jagan": "YSRCP", "jaganmohan": "YSRCP",
+    "ambati rambabu": "YSRCP", "ambati": "YSRCP",
+    "sajjala": "YSRCP", "buggana": "YSRCP", "botsa": "YSRCP",
+    "vijayasai reddy": "YSRCP", "vijayasai": "YSRCP",
+    "seediri appalaraju": "YSRCP", "seediri": "YSRCP",
+    "peddireddy": "YSRCP", "roja": "YSRCP",
+    "kakani": "YSRCP", "kakani govardhan": "YSRCP",
+    "vangaveeti": "YSRCP", "perni": "YSRCP",
+    "వైఎస్ జగన్": "YSRCP", "జగన్": "YSRCP",
+    "అంబటి": "YSRCP", "సజ్జల": "YSRCP", "బుగ్గన": "YSRCP",
+    # TDP Leaders
+    "chandrababu": "TDP", "nara chandrababu": "TDP", "cbn": "TDP",
+    "naidu": "TDP", "cm naidu": "TDP", "nara lokesh": "TDP",
+    "lokesh": "TDP", "kinjarapu": "TDP", "kollu ravindra": "TDP",
+    "devineni": "TDP", "nimmala": "TDP",
+    "చంద్రబాబు": "TDP", "నాయుడు": "TDP", "లోకేశ్": "TDP",
+    # BJP Leaders
+    "kishan reddy": "BJP", "bandi sanjay": "BJP",
+    "puranik": "BJP",
+    # JSP Leaders
+    "pawan kalyan": "JSP", "pawankalyan": "JSP",
+    "pawan": "JSP",  # Only when clearly JSP context
+    "పవన్ కల్యాణ్": "JSP", "పవన్": "JSP",
+    # Known constituency MLAs (extend as needed)
+    "gajuwaka mla": "TDP",
+    "palla": "TDP", "palla srinivasa rao": "TDP",
+    "vamsi krishna": "TDP",
+    "kodali nani": "YSRCP", "kodali": "YSRCP",
+    "rk roja": "YSRCP",
+}
 
-def similar(a1, a2):
-    # Same spokesperson + topic = same story
-    sp1, sp2 = a1.get("spokesperson","None"), a2.get("spokesperson","None")
-    if sp1 == sp2 and sp1 not in ["None",""] and a1.get("topic") == a2.get("topic"):
-        return True
-    # Keyword Jaccard similarity
-    k1 = keywords(a1.get("title","")+" "+a1.get("description",""))
-    k2 = keywords(a2.get("title","")+" "+a2.get("description",""))
-    if not k1 or not k2: return False
-    inter = len(k1&k2); union = len(k1|k2)
-    return (inter/union) >= 0.25 if union else False
+def resolve_politician_party(text):
+    """
+    Resolve political party from text using canonical politician-party table.
+    NEVER infer party from source bias.
+    Returns list of verified parties found in text.
+    """
+    t = text.lower()
+    found_parties = set()
+    for name, party in POLITICIAN_PARTY.items():
+        if name in t:
+            found_parties.add(party)
+    # Direct party name mentions (when no specific leader)
+    if "ysrcp" in t or "ysr congress" in t or "వైఎస్ఆర్సీపీ" in t:
+        found_parties.add("YSRCP")
+    if " tdp " in t or "telugu desam" in t or "టీడీపీ" in t:
+        found_parties.add("TDP")
+    if " bjp" in t or "bharatiya janata" in t or "బీజేపీ" in t:
+        found_parties.add("BJP")
+    if "janasena" in t or " jsp " in t or "జనసేన" in t:
+        found_parties.add("JSP")
+    return list(found_parties) if found_parties else ["General"]
 
-def cluster(articles):
-    groups, used = [], set()
-    for i, a in enumerate(articles):
-        if i in used: continue
-        g = [a]; used.add(i)
-        for j, b in enumerate(articles):
-            if j in used or j == i: continue
-            if similar(a, b): g.append(b); used.add(j)
-        groups.append(g)
+# ── CATEGORY ISOLATION ───────────────────────────────────────
+# Prevent entertainment/sports/lifestyle from entering political clusters
+POLITICAL_CATEGORIES = {"Governance","Amaravati","Farm Loan","Fuel Crisis",
+    "Google/IT","Law & Order","Elections","Welfare","Budget",
+    "Education","Corruption","Polavaram","Land/Property","Opposition","Aarogyasri"}
+
+NON_POLITICAL_SIGNALS = [
+    "movie","film","actor","actress","director","cinema","ott","trailer","song",
+    "cricket","ipl","football","match","tournament","sports",
+    "recipe","fashion","beauty","horoscope","astrology",
+    "death","accident","fire","flood","earthquake",  # unless politically relevant
+    "celebrity","hero","heroine","నటుడు","నటి","సినిమా","మూవీ",
+]
+
+def is_genuinely_political(article):
+    """Strict check that article is actual political content."""
+    text = (article.get("title","") + " " + article.get("description","")).lower()
+    # Reject if non-political signals dominate
+    nps = sum(1 for k in NON_POLITICAL_SIGNALS if k in text)
+    if nps >= 2: return False
+    # Must have political topic or party reference
+    topic = article.get("topic","")
+    party = article.get("party","General")
+    has_political_topic = topic in POLITICAL_CATEGORIES
+    has_party = party != "General"
+    has_political_kw = any(k in text for k in [
+        "government","minister","mla","mp","assembly","election","scheme","policy",
+        "ప్రభుత్వ","మంత్రి","ఎమ్మెల్యే","అసెంబ్లీ","ఎన్నిక","పార్టీ"
+    ])
+    return has_political_topic or has_party or has_political_kw
+
+# ── NAMED ENTITY EXTRACTION ──────────────────────────────────
+def extract_named_entities(text):
+    """
+    Extract key named entities: politicians, locations, organisations.
+    Returns set of canonical lowercased entity strings.
+    """
+    entities = set()
+    t = text.lower()
+    # Politician names from our table
+    for name in POLITICIAN_PARTY:
+        if name in t:
+            entities.add(name)
+    # Known AP constituencies / locations
+    ap_locations = [
+        "gajuwaka","visakhapatnam","vizag","vijayawada","amaravati","tirupati",
+        "guntur","kurnool","nellore","kadapa","anantapur","ongole","rajahmundry",
+        "kakinada","eluru","srikakulam","vizianagaram","rayalaseema","uttarandhra",
+        "polavaram","yarada","rushikonda","bheemunipatnam","narsipatnam","tadipatri",
+        "గాజువాక","విశాఖపట్నం","విజయవాడ","అమరావతి","తిరుపతి","గుంటూరు",
+    ]
+    for loc in ap_locations:
+        if loc in t:
+            entities.add(loc)
+    # Organisations
+    for org in ["ysrcp","tdp","bjp","jsp","janasena","high court","supreme court",
+                "cbi","ed","rti","nabard","wdra"]:
+        if org in t:
+            entities.add(org)
+    return entities
+
+# ── MULTI-STAGE CLUSTERING (replaces simple Jaccard) ─────────
+# Stage 1: Category isolation  — articles must be political
+# Stage 2: Topic match — must share same broad topic
+# Stage 3: Named entity overlap — must share politicians/locations
+# Stage 4: Semantic keyword overlap — strong Jaccard threshold
+# Stage 5: Source integrity — each source entry ties to exact article
+
+STOP_WORDS = {
+    "and","the","of","in","to","a","is","are","was","for","on","at","by","an","or",
+    "that","this","it","be","as","with","from","but","not","have","has","said","says",
+    "will","would","could","should","also","says","said","over","into","after","about",
+    "who","what","when","where","how","which","their","they","them","its","has","been",
+    "ఆ","ఈ","ఇది","కి","కు","ను","లో","పై","తో","మరియు","అని","గా","కాని","వారు","ఈ",
+}
+
+def extract_keywords_strict(text):
+    """Extract significant nouns/terms — longer words, no stop words."""
+    words = re.findall(r'\b\w{5,}\b', text.lower())  # min 5 chars (stricter)
+    return {w for w in words if w not in STOP_WORDS}
+
+def compute_article_similarity(a1, a2):
+    """
+    Multi-factor similarity score between two articles.
+    Returns (score 0.0-1.0, reasons list).
+    Higher = more similar.
+    """
+    reasons = []
+    score = 0.0
+
+    t1 = (a1.get("title","") + " " + a1.get("description","")).lower()
+    t2 = (a2.get("title","") + " " + a2.get("description","")).lower()
+
+    # STAGE 2: Topic alignment (must match or be closely related)
+    topic1, topic2 = a1.get("topic",""), a2.get("topic","")
+    if topic1 and topic2:
+        if topic1 == topic2:
+            score += 0.30
+            reasons.append(f"same_topic:{topic1}")
+        elif {topic1,topic2} <= {"Governance","Opposition"}:
+            score += 0.10  # Related broad topics, small bonus only
+
+    # STAGE 3: Named entity overlap (most important factor)
+    e1 = extract_named_entities(t1)
+    e2 = extract_named_entities(t2)
+    if e1 and e2:
+        entity_overlap = e1 & e2
+        if entity_overlap:
+            entity_score = min(0.40, len(entity_overlap) * 0.15)
+            score += entity_score
+            reasons.append(f"entity_overlap:{sorted(entity_overlap)}")
+        elif not entity_overlap and (e1 or e2):
+            # Different entities mentioned = likely different stories
+            score -= 0.15
+            reasons.append("entity_mismatch")
+
+    # STAGE 4: Strict keyword Jaccard (threshold raised to 0.30)
+    k1 = extract_keywords_strict(t1)
+    k2 = extract_keywords_strict(t2)
+    if k1 and k2:
+        inter = len(k1 & k2)
+        union = len(k1 | k2)
+        jaccard = inter / union if union else 0.0
+        if jaccard >= 0.30:
+            score += jaccard * 0.30  # Up to 0.30 bonus
+            reasons.append(f"keyword_jaccard:{jaccard:.2f}")
+        elif jaccard >= 0.15:
+            score += jaccard * 0.10  # Small bonus for partial overlap
+
+    # STAGE 5: Party consistency check
+    # Articles about completely different parties should not cluster
+    p1 = set(resolve_politician_party(t1))
+    p2 = set(resolve_politician_party(t2))
+    p1.discard("General"); p2.discard("General")
+    if p1 and p2 and not (p1 & p2):
+        # Different parties, no overlap
+        score -= 0.10
+        reasons.append(f"party_mismatch:{p1}vs{p2}")
+
+    return max(0.0, score), reasons
+
+# Minimum similarity threshold to join a cluster
+CLUSTER_SIMILARITY_THRESHOLD = 0.45
+# Minimum cluster confidence to appear in Top Stories
+MIN_CLUSTER_CONFIDENCE = 0.40
+# Minimum unique sources to appear in Top Stories
+MIN_UNIQUE_SOURCES = 2
+
+def cluster_articles_strict(articles):
+    """
+    Multi-stage clustering with strict validation.
+    Returns list of clusters, each with confidence metadata.
+    """
+    # Pre-filter: only genuinely political articles
+    political_arts = [a for a in articles if is_genuinely_political(a)]
+    non_political_count = len(articles) - len(political_arts)
+    if non_political_count > 0:
+        print(f"  Clustering: filtered out {non_political_count} non-political articles")
+
+    groups = []
+    used = set()
+
+    for i, seed in enumerate(political_arts):
+        if i in used:
+            continue
+        cluster = [seed]
+        used.add(i)
+        cluster_scores = []
+
+        for j, candidate in enumerate(political_arts):
+            if j in used or j == i:
+                continue
+            score, reasons = compute_article_similarity(seed, candidate)
+            if score >= CLUSTER_SIMILARITY_THRESHOLD:
+                cluster.append(candidate)
+                cluster_scores.append(score)
+                used.add(j)
+
+        # Cluster confidence = average similarity score of members
+        confidence = (sum(cluster_scores) / len(cluster_scores)) if cluster_scores else 0.8
+        groups.append({
+            "articles": cluster,
+            "confidence": confidence,
+            "size": len(cluster),
+        })
+
     return groups
 
 def build_top_stories(all_arts):
-    groups = cluster(all_arts)
+    """
+    Build Top Stories with strict validation.
+    Each source entry preserves the EXACT article URL it came from.
+    """
+    groups = cluster_articles_strict(all_arts)
     stories = []
-    for g in groups:
-        if not g: continue
-        best = max(g, key=lambda a: len(a.get("title","")))
+
+    for group in groups:
+        cluster = group["articles"]
+        confidence = group["confidence"]
+        if not cluster:
+            continue
+
+        # Minimum quality gates
+        # Build source map FIRST with exact article references
+        # key = source name, value = {url, headline, article_hash}
+        sources_map = {}
+        for art in cluster:
+            src_name = art.get("source","")
+            if not src_name:
+                continue
+            art_url = art.get("url","")
+            art_title = art.get("title","")
+            art_hash = art.get("article_hash","")
+            if src_name not in sources_map:
+                # First article from this source = authoritative entry
+                sources_map[src_name] = {
+                    "name": src_name,
+                    "url": art_url,          # EXACT article URL
+                    "headline": art_title,   # EXACT article headline
+                    "hash": art_hash,
+                }
+
+        unique_src_count = len(sources_map)
+
+        # Skip clusters that don't meet minimum quality
+        if unique_src_count < MIN_UNIQUE_SOURCES and confidence < 0.70:
+            continue  # Single-source stories only shown if very high confidence
+        if confidence < MIN_CLUSTER_CONFIDENCE:
+            continue  # Low confidence clusters never shown
+
+        # Best headline: prefer English, then longest
+        english_arts = [a for a in cluster if a.get("language","") == "en"]
+        best = (max(english_arts, key=lambda a: len(a.get("title","")))
+                if english_arts else max(cluster, key=lambda a: len(a.get("title",""))))
         headline = best.get("title","")
-        srcs = {}
-        for a in g:
-            s = a.get("source","")
-            if s and s not in srcs: srcs[s] = a.get("url","")
-        unique_src = len(srcs); cov = len(g)
-        base = max(a.get("viral_score",0) for a in g)
-        cov_boost = min(30, cov*5); src_boost = min(20, unique_src*7)
-        ysrcp_srcs = {"Sakshi","YSRCP Official"}; tdp_srcs = {"Eenadu","Andhra Jyothi","TDP Official"}
-        eco = 15 if (any(s in ysrcp_srcs for s in srcs) and any(s in tdp_srcs for s in srcs)) else 0
-        reach = min(100, base+cov_boost+src_boost+eco)
-        v_lbl = "High" if reach>=70 else ("Medium" if reach>=40 else "Low")
-        topic = best.get("topic","Governance")
-        long_topics = ["Amaravati","Polavaram","Elections","Corruption","Farm Loan"]
-        trend = "2-3 days" if (reach>=70 or topic in long_topics) else ("1 day" if (reach>=40 or unique_src>=3) else ("few hours" if cov>=2 else "hours"))
-        parties = set()
-        for a in g:
-            for p in (a.get("party","") or "").split("/"):
-                if p and p!="General": parties.add(p)
-        cov_type = "multi_directional" if len(parties)>=2 else ("wide_coverage" if unique_src>=3 else "one_directional")
-        latest = max(g, key=lambda a: a.get("published_at",""))
+
+        # Party: use resolved politician party, NOT source bias
+        all_text = " ".join(a.get("title","")+" "+a.get("description","") for a in cluster)
+        verified_parties = resolve_politician_party(all_text)
+        party_str = "/".join(p for p in verified_parties if p != "General") or "General"
+
+        # Spokesperson: only if consistently mentioned across articles
+        spokesperson_counts = {}
+        for art in cluster:
+            sp = art.get("spokesperson","None")
+            if sp and sp != "None":
+                spokesperson_counts[sp] = spokesperson_counts.get(sp,0) + 1
+        # Only include spokesperson if mentioned in ≥2 articles or majority
+        top_spokesperson = "None"
+        if spokesperson_counts:
+            top_sp, top_count = max(spokesperson_counts.items(), key=lambda x: x[1])
+            if top_count >= 2 or (len(cluster) == 1):
+                top_spokesperson = top_sp
+
+        # Topic from cluster majority
+        topic_counts = {}
+        for art in cluster:
+            t = art.get("topic","Governance")
+            topic_counts[t] = topic_counts.get(t,0) + 1
+        topic = max(topic_counts, key=topic_counts.get)
+
+        # Viral/reach scoring
+        base_viral = max(a.get("viral_score",0) for a in cluster)
+        cov_count = len(cluster)
+        cov_boost = min(25, cov_count * 5)
+        src_boost = min(20, unique_src_count * 6)
+        # Cross-ecosystem bonus
+        ysrcp_srcs = {"Sakshi","YSRCP Official"}
+        tdp_srcs = {"Eenadu","Andhra Jyothi","TDP Official","Eenadu AP"}
+        neutral_srcs = {"NDTV","The Hindu","Indian Express","Times of India","Hindustan Times"}
+        src_names = set(sources_map.keys())
+        eco_bonus = 15 if ((src_names & ysrcp_srcs) and (src_names & tdp_srcs)) else 0
+        neutral_bonus = 10 if src_names & neutral_srcs else 0
+        confidence_bonus = int(confidence * 10)
+        reach = min(100, base_viral + cov_boost + src_boost + eco_bonus + neutral_bonus + confidence_bonus)
+        v_lbl = "High" if reach >= 70 else ("Medium" if reach >= 40 else "Low")
+
+        # Trend duration
+        long_topics = {"Amaravati","Polavaram","Elections","Corruption","Farm Loan"}
+        if reach >= 70 or topic in long_topics:
+            trend = "2-3 days"
+        elif reach >= 40 or unique_src_count >= 3:
+            trend = "1 day"
+        elif cov_count >= 2:
+            trend = "few hours"
+        else:
+            trend = "hours"
+
+        # Coverage type
+        parties_in_cluster = set()
+        for vp in verified_parties:
+            if vp != "General": parties_in_cluster.add(vp)
+        if len(parties_in_cluster) >= 2:
+            cov_type = "multi_directional"
+        elif unique_src_count >= 3:
+            cov_type = "wide_coverage"
+        else:
+            cov_type = "one_directional"
+
+        latest = max(cluster, key=lambda a: a.get("published_at",""))
+
         stories.append({
             "headline": headline,
             "topic": topic,
-            "party": best.get("party","General"),
-            "spokesperson": best.get("spokesperson","None"),
-            "coverage_count": cov,
-            "unique_source_count": unique_src,
+            "party": party_str,
+            "spokesperson": top_spokesperson,
+            "coverage_count": cov_count,
+            "unique_source_count": unique_src_count,
             "reach_score": reach,
             "viral_score": v_lbl,
             "trend_duration": trend,
             "coverage_type": cov_type,
+            "cluster_confidence": round(confidence, 2),
             "published_at": latest.get("published_at",""),
-            "sources": [{"name":n,"url":u} for n,u in srcs.items()],
+            # STRICT source list: each entry has exact article URL + headline
+            "sources": list(sources_map.values()),
             "summary": "",
         })
-    stories.sort(key=lambda s:(s["reach_score"],s["coverage_count"]), reverse=True)
+
+    # Sort by reach_score desc then coverage_count
+    stories.sort(key=lambda s: (s["reach_score"], s["coverage_count"]), reverse=True)
     return stories[:10]
 
 # ── CRAWL LOOP ───────────────────────────────────────────────

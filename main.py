@@ -204,12 +204,25 @@ def tag_article(title, desc="", source_type="news", source_party=None, source_bi
 # ── DATE PARSER ──────────────────────────────────────────────
 def parse_pub(s):
     if not s: return now_ist()
-    for fmt in ["%a, %d %b %Y %H:%M:%S %z","%a, %d %b %Y %H:%M:%S GMT",
-                "%Y-%m-%dT%H:%M:%S%z","%Y-%m-%d %H:%M:%S","%Y-%m-%dT%H:%M:%SZ",
-                "%d-%m-%Y %I:%M %p","%d-%m-%Y"]:
+    # Clean the string first
+    s = s.strip()
+    for fmt in [
+        "%a, %d %b %Y %H:%M:%S %z",   # RSS standard: Mon, 11 May 2026 10:44:00 +0530
+        "%a, %d %b %Y %H:%M:%S GMT",   # RSS UTC
+        "%Y-%m-%dT%H:%M:%S%z",         # ISO 8601
+        "%Y-%m-%dT%H:%M:%SZ",          # ISO 8601 UTC
+        "%Y-%m-%d %H:%M:%S",           # Simple datetime
+        "%d-%m-%Y %I:%M %p",           # YSRCP: 11-05-2026 10:44 PM
+        "%d-%m-%Y %H:%M:%S",           # YSRCP alternate
+        "%d-%m-%Y",                     # Date only
+        "%B %d, %Y",                   # May 11, 2026
+        "%b %d, %Y",                   # May 11, 2026 short
+        "%d %B %Y",                    # 11 May 2026
+        "%Y/%m/%d %H:%M:%S",
+    ]:
         try:
-            dt = datetime.strptime(s.strip(), fmt)
-            if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+            dt = datetime.strptime(s, fmt)
+            if dt.tzinfo is None: dt = dt.replace(tzinfo=IST)
             return dt.astimezone(IST)
         except: pass
     return now_ist()
@@ -343,7 +356,12 @@ def scrape_ysrcp_official():
                 desc = full.replace(title,"").strip()[:200]
             date_text = ""
             if parent:
-                dm = re.findall(r'\d{2}-\d{2}-\d{4}', parent.get_text())
+                ptext = parent.get_text()
+                # Try full datetime first: "11-05-2026 10:44 PM"
+                dm = re.findall(r'\d{2}-\d{2}-\d{4}\s+\d{1,2}:\d{2}\s*[AP]M', ptext)
+                if not dm:
+                    # Try date only: "11-05-2026"
+                    dm = re.findall(r'\d{2}-\d{2}-\d{4}', ptext)
                 date_text = dm[0] if dm else ""
             pub = parse_pub(date_text) if date_text else now_ist()
             if pub < cutoff: continue
@@ -402,18 +420,16 @@ TELUGU_RSS = [
 TELUGU_HTML = [
     ("https://www.eenadu.net/andhra-pradesh","Eenadu","https://www.eenadu.net","/telugu-news/","news",None,"pro_tdp"),
 ]
+# NOTE: Most English RSS feeds block Render.com server IPs (Cloudflare WAF).
+# English media news is fetched CLIENT-SIDE via rss2json browser proxy.
+# Backend only keeps sources known to work from server IPs.
 ENGLISH_RSS = [
-    ("https://feeds.feedburner.com/ndtvnews-india-news","NDTV","en","news",None,"neutral"),
-    ("https://www.thehindu.com/news/national/andhra-pradesh/?service=rss","The Hindu","en","news",None,"neutral"),
-    ("https://indianexpress.com/feed/","Indian Express","en","news",None,"neutral"),
-    ("https://www.deccanchronicle.com/rss_feed/","Deccan Chronicle","en","news",None,"neutral"),
-    ("https://www.newindianexpress.com/rss/andhra-pradesh.xml","New Indian Express","en","news",None,"neutral"),
-    ("https://timesofindia.indiatimes.com/rssfeeds/296589292.cms","Times of India","en","news",None,"neutral"),
-    ("https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml","Hindustan Times","en","news",None,"neutral"),
-    ("https://telugu.news18.com/commonfeeds/v1/tel/rss/news.xml","News18 Telugu","en","news",None,"neutral"),
-    ("https://www.siasat.com/feed/","Siasat","en","news",None,"neutral"),
-    ("https://theprint.in/feed/","The Print","en","news",None,"neutral"),
+    # These are fetched server-side but most return 403 from Render.com
+    # Kept here for compatibility - scrape_rss handles 403 gracefully
 ]
+# English content comes primarily from:
+# 1. YSRCP Official website (English press releases)
+# 2. Client-side RSS fetching in the browser (rss2json proxy)
 
 def dedup_sort(items):
     seen, out = set(), []
@@ -684,6 +700,7 @@ def build_top_stories(all_arts):
             continue
 
         # Minimum quality gates
+        # IMPORTANT: Single-source party official clusters should not dominate Top Stories
         # Build source map FIRST with exact article references
         # key = source name, value = {url, headline, article_hash}
         sources_map = {}
@@ -706,7 +723,12 @@ def build_top_stories(all_arts):
         unique_src_count = len(sources_map)
 
         # Skip clusters that don't meet minimum quality
-        if unique_src_count < MIN_UNIQUE_SOURCES and confidence < 0.70:
+        # Party official single-source articles should NOT appear in Top Stories
+        # They belong in the party feed, not as "top stories"
+        is_party_only = all(a.get("source_type") == "party_official" for a in cluster)
+        if is_party_only and unique_src_count < 2:
+            continue  # Party-only single-source: skip from Top Stories
+        if unique_src_count < MIN_UNIQUE_SOURCES and confidence < 0.75:
             continue  # Single-source stories only shown if very high confidence
         if confidence < MIN_CLUSTER_CONFIDENCE:
             continue  # Low confidence clusters never shown
